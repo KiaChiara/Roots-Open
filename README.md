@@ -13,7 +13,7 @@ pinned: false
 *Everyone has a place they come from. This is a sound map for all of them.*
 
 **Roots (Open)** is the open, participatory companion to a personal work,
-[Roots — 내 고향](https://github.com/YOUR-USERNAME/roots). Where the original piece is built
+[Roots — 내 고향](https://github.com/KiaChiara/Roots/). Where the original piece is built
 around four places that matter to me, this version opens the same idea to anyone: pick your
 own country or city, and watch a piece of music become a drawing traced over its shape.
 
@@ -65,7 +65,7 @@ Then open the local URL shown in the terminal (usually `http://127.0.0.1:7860`).
 ## The original work
 
 This is an extension. The personal work it grows from is here:
-👉 [Roots — 내 고향](https://github.com/YOUR-USERNAME/roots)
+👉 [Roots — 내 고향](https://github.com/KiaChiara/Roots/)
 
 ## Author
 
