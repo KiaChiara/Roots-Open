@@ -1,15 +1,16 @@
 """
-render_mp4.py — rendering offline del "Sound Map" in un video MP4 di qualita' piena.
+render_mp4.py — offline rendering of the drawing to a full-quality MP4 video.
 
-Replica la logica della visualizzazione p5.js:
-- posizione X per percentile del pitch nel brano
-- curve jellyfish (Catmull-Rom con ancore lontane, tramite Perlin)
-- accumulo permanente a bassa opacita' + flash che svaniscono
-- maschera che ritaglia il disegno alla forma
-- per l'Italia: disegno su spazio sdraiato, poi rotazione -90 della composizione
+Reproduces the logic of the p5.js visualization:
+- X position from the pitch percentile within the piece
+- "jellyfish" curves (Catmull-Rom with distant anchors, driven by Perlin noise)
+- permanent low-opacity accumulation + fading flashes
+- a mask that clips the drawing to the shape
+- for Italy: drawing in a lying space, then rotation of the composition
+  (low notes at the bottom, high notes at the top, as in the browser)
 
-NB: p5.noise() e il Perlin qui non sono identici bit-per-bit, quindi il video
-non e' pixel-identico all'anteprima del browser; logica ed estetica sono le stesse.
+Note: p5.noise() and the Perlin noise used here are not bit-identical, so the
+video is not pixel-identical to the browser preview; logic and look are the same.
 """
 
 import io
@@ -28,7 +29,7 @@ FLASH_DUR = 0.5
 ACCUM_ALPHA = 26
 
 
-# ---------- Perlin noise (equivalente, non identico a p5) ----------
+# ---------- Perlin noise (equivalent, not identical to p5) ----------
 _p = np.arange(256, dtype=int)
 np.random.seed(42)
 np.random.shuffle(_p)
@@ -43,7 +44,7 @@ def _grad(h, x, y):
     return (np.where((h & 1) == 0, u, -u) + np.where((h & 2) == 0, v, -v))
 
 def perlin(x, y):
-    """Perlin 2D vettoriale, restituisce ~0..1 come p5.noise."""
+    """Vectorized 2D Perlin noise, returns ~0..1 like p5.noise."""
     xi = np.floor(x).astype(int) & 255
     yi = np.floor(y).astype(int) & 255
     xf = x - np.floor(x)
@@ -62,7 +63,7 @@ def noise2(x, y):
     return float(perlin(np.array([x * 1.0]), np.array([y * 1.0]))[0])
 
 
-# ---------- colore HSL->RGB come nello sketch ----------
+# ---------- HSL->RGB colour, as in the sketch ----------
 def hsl_rgb(h, s, l):
     h = h / 360.0
     if s == 0:
@@ -81,7 +82,7 @@ def hsl_rgb(h, s, l):
     return (int(r * 255), int(g * 255), int(b * 255))
 
 
-# ---------- Catmull-Rom come curve() di p5 ----------
+# ---------- Catmull-Rom, like p5's curve() ----------
 def catmull_rom(p0, p1, p2, p3, seg=32):
     pts = []
     for i in range(seg + 1):
@@ -122,10 +123,25 @@ def event_geometry(ev, idx, DW, DH, sorted_midis):
                 r=r, g=g, b=b, time=ev["time"])
 
 
-def draw_curve(draw, geo, rgba, width):
+def draw_curve(base, geo, rgba, width):
+    """Draws the curve ON TOP of what is already there (alpha blending, like the
+    browser canvas). ImageDraw on an RGBA image replaces pixels instead of
+    blending them, so the curve is drawn on a separate layer the size of its
+    bounding box and then composited onto the base image."""
     pts = catmull_rom((geo['a1x'], geo['a1y']), (geo['x'], geo['y']),
                       (geo['x2'], geo['y2']), (geo['a2x'], geo['a2y']))
-    draw.line(pts, fill=rgba, width=max(1, int(round(width))), joint='curve')
+    w = max(1, int(round(width)))
+    pad = w + 2
+    x0 = max(0, int(math.floor(min(p[0] for p in pts))) - pad)
+    y0 = max(0, int(math.floor(min(p[1] for p in pts))) - pad)
+    x1 = min(base.width, int(math.ceil(max(p[0] for p in pts))) + pad)
+    y1 = min(base.height, int(math.ceil(max(p[1] for p in pts))) + pad)
+    if x1 <= x0 or y1 <= y0:
+        return  # curve entirely outside the drawing
+    tmp = Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0))
+    ImageDraw.Draw(tmp).line([(px - x0, py - y0) for px, py in pts],
+                             fill=rgba, width=w, joint='curve')
+    base.alpha_composite(tmp, dest=(x0, y0))
 
 
 def render(score, audio_path, mask_b64, mask_key, out_path,
@@ -136,13 +152,13 @@ def render(score, audio_path, mask_b64, mask_key, out_path,
     duration = min(score["duration"], max_seconds) if max_seconds else score["duration"]
     sorted_midis = sorted(69 + 12 * math.log2(e["freq"] / 440.0) for e in events)
 
-    # maschera
+    # mask
     raw = mask_b64.split(",", 1)[1]
     import base64
     mimg = Image.open(io.BytesIO(base64.b64decode(raw))).convert("RGBA")
 
     rotate = (mask_key == "italy")
-    # dimensioni canvas dritto
+    # upright canvas size
     aspect = mimg.width / mimg.height
     if aspect >= 1:
         W = 1200; H = int(1200 / aspect)
@@ -151,10 +167,10 @@ def render(score, audio_path, mask_b64, mask_key, out_path,
     mimg = mimg.resize((W, H), Image.LANCZOS)
     mask_alpha = mimg.split()[3]
 
-    # spazio di disegno (sdraiato se Italia)
+    # drawing space (lying for Italy)
     DW, DH = (H, W) if rotate else (W, H)
 
-    # pre-calcolo geometrie
+    # precompute geometries
     geos = [event_geometry(e, i, DW, DH, sorted_midis) for i, e in enumerate(events)]
     geos = [g for g in geos if g]
 
@@ -163,36 +179,36 @@ def render(score, audio_path, mask_b64, mask_key, out_path,
     tmpdir = tempfile.mkdtemp()
 
     accum = Image.new("RGBA", (DW, DH), (0, 0, 0, 0))
-    accum_draw = ImageDraw.Draw(accum)
     next_ev = 0
 
     for f in range(n_frames):
         t = f / FPS
         while next_ev < len(geos) and geos[next_ev]["time"] <= t:
             g = geos[next_ev]
-            draw_curve(accum_draw, g, (g["r"], g["g"], g["b"], ACCUM_ALPHA), 1.2)
+            draw_curve(accum, g, (g["r"], g["g"], g["b"], ACCUM_ALPHA), 1.2)
             next_ev += 1
 
         flash = Image.new("RGBA", (DW, DH), (0, 0, 0, 0))
-        fdraw = ImageDraw.Draw(flash)
         for g in geos:
             el = t - g["time"]
             if 0 <= el <= FLASH_DUR:
                 tt = el / FLASH_DUR
                 a = int(_lerp(180, 0, tt)); w = _lerp(2.2, 0.6, tt)
-                draw_curve(fdraw, g, (g["r"], g["g"], g["b"], a), w)
+                draw_curve(flash, g, (g["r"], g["g"], g["b"], a), w)
 
-        # compongo disegno
+        # compose the drawing
         layer = Image.new("RGBA", (DW, DH), (0, 0, 0, 0))
         layer.alpha_composite(accum)
         layer.alpha_composite(flash)
 
-        # rotazione per Italia: ruoto il layer di -90 per rimetterlo dritto
+        # rotation for Italy, like p.rotate(-HALF_PI) in the browser: in PIL a
+        # positive angle rotates COUNTERCLOCKWISE, so +90 brings the right side of
+        # the lying space (high notes) to the top and the left (low notes) down.
         if rotate:
-            layer = layer.rotate(-90, expand=True)  # da (DW,DH) a (DH,DW)=(W,H)
+            layer = layer.rotate(90, expand=True)  # from (DW,DH) to (DH,DW)=(W,H)
 
-        # applico maschera: l'alpha del disegno viene moltiplicato per la maschera,
-        # cosi' il disegno appare SOLO dentro la forma
+        # apply the mask: the drawing's alpha is multiplied by the mask,
+        # so the drawing appears ONLY inside the shape
         larr = np.array(layer)
         marr = np.array(mask_alpha)
         larr[:, :, 3] = (larr[:, :, 3].astype(int) * marr // 255).astype(np.uint8)
@@ -205,7 +221,7 @@ def render(score, audio_path, mask_b64, mask_key, out_path,
         if progress and f % 15 == 0:
             progress(f / n_frames)
 
-    # assemblo con ffmpeg + audio
+    # assemble with ffmpeg + audio
     subprocess.run([
         "ffmpeg", "-y", "-loglevel", "error",
         "-framerate", str(FPS), "-i", os.path.join(tmpdir, "f%05d.png"),

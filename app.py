@@ -1,12 +1,12 @@
 """
-Seoul Sound Map — demo interattiva
-Carica un MIDI: la demo estrae la partitura, sintetizza un audio di lavoro,
-e mostra la visualizzazione interattiva (curve sonore dentro la mappa di Seoul).
-Puoi anche caricare un audio alternativo (es. export dal tuo DAW) da usare al
-posto di quello sintetizzato.
+Roots-Open — MIDI-driven generative drawing
+Upload a MIDI file: the app extracts the score, synthesizes a working audio track,
+and shows the interactive visualization (curves drawn inside the chosen map).
+You can also upload your own audio (e.g. an export from your DAW) to use instead
+of the synthesized one.
 
-Avvio:
-    pip install gradio pretty_midi numpy soundfile
+Run locally:
+    pip install -r requirements.txt
     python3 app.py
 """
 
@@ -17,6 +17,18 @@ import os
 import tempfile
 
 import gradio as gr
+
+# ZeroGPU compatibility: on the free tier, Gradio Spaces run on ZeroGPU, which
+# requires at least one function decorated with @spaces.GPU or the Space fails at
+# startup ("No @spaces.GPU function detected"). This app runs on CPU and does not
+# need a GPU, so we add a tiny no-op just to satisfy that requirement.
+try:
+    import spaces
+    @spaces.GPU
+    def _zerogpu_noop():
+        return None
+except Exception:
+    pass
 import numpy as np
 import pretty_midi
 import soundfile as sf
@@ -38,7 +50,7 @@ _other = [k for k in MASK_LABELS if k not in _curated and k not in _kr and k not
 MENU_CHOICES = [MASK_LABELS[k] for k in (_curated + _kr + _co + _other)]
 
 
-# ---------- estrazione note dal MIDI ----------
+# ---------- note extraction from MIDI ----------
 def extract_score(midi_path, max_seconds=None):
     pm = pretty_midi.PrettyMIDI(midi_path)
     full_duration = float(pm.get_end_time())
@@ -49,12 +61,12 @@ def extract_score(midi_path, max_seconds=None):
             continue
         for n in inst.notes:
             if n.start >= limit:
-                continue  # oltre il limite: scarto
+                continue  # beyond the limit: skip
             events.append({
                 "time": round(float(n.start), 4),
                 "freq": round(float(pretty_midi.note_number_to_hz(n.pitch)), 2),
                 "amplitude": round(n.velocity / 127.0, 4),
-                # taglio anche la durata se la nota sfora il limite
+                # also trim the duration if the note runs past the limit
                 "duration": round(float(min(n.end, limit) - n.start), 4),
             })
     events.sort(key=lambda e: e["time"])
@@ -67,10 +79,10 @@ def extract_score(midi_path, max_seconds=None):
     }
 
 
-# ---------- sintesi audio di lavoro (con soft-limiter) ----------
+# ---------- working audio synthesis (with soft limiter) ----------
 def synth_audio(events, duration):
-    # la coda arriva esattamente alla fine dell'ultima nota (niente secondo extra
-    # che farebbe suonare l'audio oltre il brano vero)
+    # the audio ends exactly at the end of the last note (no extra second that
+    # would make it play past the actual piece)
     if events:
         last_end = max(e["time"] + e["duration"] for e in events)
     else:
@@ -104,25 +116,27 @@ def synth_audio(events, duration):
     return mix.astype("float32")
 
 
-# ---------- il componente di visualizzazione (p5.js) ----------
+# ---------- the visualization component (p5.js) ----------
 def build_viz_html(score_json, audio_b64, mask_key="seoul"):
     mask = ALL_MASKS.get(mask_key, ALL_MASKS["seoul"])
     MASK_B64 = mask["b64"]
     mask_w, mask_h = mask["w"], mask["h"]
 
-    # ITALIA: la maschera resta DRITTA e il canvas ha le sue proporzioni normali.
-    # La rotazione avviene DENTRO p5 al momento del disegno (non con CSS, non
-    # ruotando l'immagine): le curve si generano con la logica standard su uno
-    # "spazio sdraiato" e vengono appoggiate ruotate sul canvas dritto.
+    # ITALY: the mask stays UPRIGHT and the canvas keeps its normal proportions.
+    # The rotation happens INSIDE p5 at drawing time (not with CSS, not by
+    # rotating the image): curves are generated with the standard logic in a
+    # "lying" space and then placed, rotated, on the upright canvas.
     rotate_draw = (mask_key == "italy")
     rotate_js = "true" if rotate_draw else "false"
+    # base name for downloaded image/video files (e.g. roots_seoul.png)
+    file_slug = {"roma": "rome"}.get(mask_key, mask_key).replace("country_", "").replace("krcity_", "")
 
     aspect = mask_w / mask_h
     if aspect >= 1:
         cw = 1200; ch = int(1200 / aspect)
     else:
         ch = 1000; cw = int(1000 * aspect)
-    """Costruisce la visualizzazione p5.js dentro un IFRAME isolato."""
+    """Builds the p5.js visualization inside an isolated IFRAME."""
     canvas_css = "max-width:100%;max-height:100%;height:auto;width:auto;"
     inner = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
@@ -162,10 +176,10 @@ button:hover{{background:#232b35;}}
   const MASK_B64 = "{MASK_B64}";
   const SCORE = {json.dumps(score_json)};
   const AUDIO_B64 = "{audio_b64}";
-  const ROTATE_DRAW = {rotate_js};  // Italia: disegno sdraiato, composizione ruotata
+  const ROTATE_DRAW = {rotate_js};  // Italy: lying drawing space, rotated composition
 
   let W = {cw}, H = {ch}, BIG_MULT = 2;
-  // dimensioni dello spazio di DISEGNO: se ruotato, sono scambiate (sdraiate)
+  // size of the DRAWING space: swapped (lying) when rotated
   let DW = ROTATE_DRAW ? H : W;
   let DH = ROTATE_DRAW ? W : H;
   let events = SCORE.events.slice().sort((a,b)=>a.time-b.time);
@@ -186,8 +200,8 @@ button:hover{{background:#232b35;}}
   new p5(function(p){{
     p.setup = function(){{
       let c = p.createCanvas(W,H); c.parent('viz-holder');
-      p.frameRate(30);  // 30fps: piu' leggero e compatibile, resa visiva quasi identica
-      window._p5canvas = c.elt;  // riferimento al canvas per i pulsanti esterni
+      p.frameRate(30);  // 30fps: lighter and more compatible, visually almost identical
+      window._p5canvas = c.elt;  // canvas reference for the external buttons
       window._p5inst = p;
       accum = p.createGraphics(DW,DH); accum.clear();
       flashG = p.createGraphics(DW,DH); flashG.clear();
@@ -196,26 +210,20 @@ button:hover{{background:#232b35;}}
       mi.onload = ()=>{{ maskCanvas.getContext('2d').drawImage(mi,0,0,W,H); maskReady=true; }};
       mi.src = MASK_B64;
       player = document.getElementById('viz-player');
-      // Converto i dati audio in un BLOB URL invece di usare una data URL gigante.
-      // I browser non bufferizzano bene gli audio grandi incorporati come data URL
-      // (possono riavviarsi a meta' riproduzione); un blob URL viene gestito come
-      // un file audio normale, con buffering corretto.
-      (function(){{
-        let bin = atob(AUDIO_B64);
-        let bytes = new Uint8Array(bin.length);
-        for(let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
-        let blob = new Blob([bytes], {{type:'audio/wav'}});
-        player.src = URL.createObjectURL(blob);
-      }})();
+      // Audio as a direct data URI (no blob URL): on Hugging Face the site is
+      // served over HTTPS and a blob: inside the iframe can be blocked as
+      // "insecure content". The data URI is part of the same document, so it is
+      // not blocked. The audio is trimmed to the max duration, so it stays light.
+      player.src = "data:audio/wav;base64," + AUDIO_B64;
       player.load();
 
-      // barra di avanzamento + timer
+      // progress bar + timer
       let seek = document.getElementById('seek');
       let tlabel = document.getElementById('tlabel');
       let dragging = false;
       function fmt(s){{ s=Math.max(0,s|0); return (s/60|0)+':'+('0'+(s%60)).slice(-2); }}
 
-      // l'audio aggiorna la barra (solo quando NON la stai trascinando)
+      // the audio updates the bar (only while it is NOT being dragged)
       player.addEventListener('timeupdate', ()=>{{
         if(dragging || !player.duration) return;
         seek.value = (player.currentTime/player.duration*1000)|0;
@@ -225,20 +233,20 @@ button:hover{{background:#232b35;}}
         tlabel.textContent = '0:00 / '+fmt(player.duration);
       }});
 
-      // la barra muove l'audio SOLO durante un trascinamento reale del mouse.
-      // Uso pointerdown/pointerup: nessun evento automatico puo' spostare l'audio.
+      // the bar moves the audio ONLY during a real mouse drag.
+      // pointerdown/pointerup are used so no automatic event can move the audio.
       seek.addEventListener('pointerdown', ()=>{{ dragging = true; }});
       seek.addEventListener('pointerup', ()=>{{
         if(player.duration) player.currentTime = seek.value/1000*player.duration;
         dragging = false;
       }});
-      // mentre trascini, aggiorno solo l'etichetta (non tocco l'audio)
+      // while dragging, only the label is updated (the audio is left alone)
       seek.addEventListener('input', ()=>{{
         if(dragging && player.duration)
           tlabel.textContent = fmt(seek.value/1000*player.duration)+' / '+fmt(player.duration);
       }});
 
-      // FINE BRANO: stop netto, nessun riavvio
+      // END OF PIECE: clean stop, no restart
       player.loop = false;
       player.addEventListener('ended', ()=>{{ player.pause(); }});
 
@@ -249,16 +257,16 @@ button:hover{{background:#232b35;}}
       p.background(10,13,18);
       if(player){{
         let ct = player.currentTime;
-        // se il tempo e' andato indietro rispetto agli eventi gia' disegnati
-        // (barra trascinata indietro, restart), ricostruisco l'accumulo da zero
-        // fino al punto attuale. Cosi' il canvas non si congela mai.
+        // if time went backwards relative to the events already drawn
+        // (bar dragged back, restart), rebuild the accumulation from scratch
+        // up to the current point, so the canvas never freezes.
         if(nextIdx>0 && ct < (events[nextIdx-1] ? events[nextIdx-1].time : 0)){{
           accum.clear(); flashes = []; nextIdx = 0;
         }}
         if(!player.paused){{
-          // limito quanti eventi disegno per frame: se sono molto indietro
-          // (dopo un salto), evito di bloccare il browser disegnandone centinaia
-          // in un colpo solo. Ne disegno un blocco per frame finche' recupero.
+          // cap how many events are drawn per frame: when far behind (after a
+          // jump), drawing hundreds at once would block the browser, so they are
+          // drawn in batches, one per frame, until caught up.
           let budget = 120;
           while(nextIdx<events.length && events[nextIdx].time<=ct && budget-->0){{
             drawEvent(events[nextIdx]); nextIdx++;
@@ -267,13 +275,13 @@ button:hover{{background:#232b35;}}
         }}
         let dbg = document.getElementById('dbg');
         if(dbg) dbg.textContent = 'audio t='+ct.toFixed(1)+'s / dur='+(player.duration||0).toFixed(1)
-          +'s | eventi '+nextIdx+'/'+events.length;
+          +'s | events '+nextIdx+'/'+events.length;
       }}
       updateFlashes(p);
-      // compongo accumulo+flash sul canvas. Se ROTATE_DRAW, ruoto di -90° cosi'
-      // lo spazio di disegno sdraiato (DWxDH) si appoggia dritto sul canvas (WxH):
-      // cio' che era a destra (acuto) va in alto, cio' che era a sinistra (grave)
-      // va in basso. La maschera (dritta) si applica DOPO, senza rotazione.
+      // compose accumulation + flashes on the canvas. With ROTATE_DRAW, rotate by
+      // -90° so the lying drawing space (DWxDH) sits upright on the canvas (WxH):
+      // what was on the right (high notes) goes to the top, what was on the left
+      // (low notes) to the bottom. The (upright) mask is applied AFTER, unrotated.
       p.push();
       if(ROTATE_DRAW){{
         p.translate(W/2, H/2);
@@ -330,7 +338,7 @@ button:hover{{background:#232b35;}}
   window.vizPlay = function(){{ if(player){{ player.play(); }} }};
   window.vizPause = function(){{ if(player){{ player.pause(); }} }};
 
-  // schermo intero sul contenitore della visualizzazione
+  // fullscreen on the visualization container
   window.vizFull = function(){{
     let el = document.getElementById('wrap');
     if(document.fullscreenElement){{ document.exitFullscreen(); }}
@@ -338,16 +346,16 @@ button:hover{{background:#232b35;}}
     else if(el.webkitRequestFullscreen){{ el.webkitRequestFullscreen(); }}
   }};
 
-  // salva il fotogramma corrente come PNG
+  // save the current frame as PNG
   window.vizSaveImg = function(){{
     if(!window._p5canvas) return;
     let a = document.createElement('a');
-    a.download = 'seoul_quadro.png';
+    a.download = 'roots_{file_slug}.png';
     a.href = window._p5canvas.toDataURL('image/png');
     a.click();
   }};
 
-  // registra un video del canvas (con audio) mentre suona, dal vivo
+  // record a live video of the canvas (with audio) while it plays
   let mediaRec=null, recChunks=[], recording=false;
   window.vizRec = function(){{
     let btn = document.getElementById('recBtn');
@@ -355,29 +363,29 @@ button:hover{{background:#232b35;}}
       if(!window._p5canvas) return;
       recChunks=[];
       let vstream = window._p5canvas.captureStream(30);
-      // provo ad agganciare anche l'audio dell'elemento player
+      // try to attach the player's audio as well
       try{{
         let actx = new (window.AudioContext||window.webkitAudioContext)();
         let src = actx.createMediaElementSource(player);
         let dst = actx.createMediaStreamDestination();
         src.connect(dst); src.connect(actx.destination);
         dst.stream.getAudioTracks().forEach(t=>vstream.addTrack(t));
-      }}catch(e){{ /* se l'audio non si aggancia, registro solo video */ }}
+      }}catch(e){{ /* if the audio cannot be attached, record video only */ }}
       mediaRec = new MediaRecorder(vstream, {{mimeType:'video/webm'}});
       mediaRec.ondataavailable = e=>{{ if(e.data.size>0) recChunks.push(e.data); }};
       mediaRec.onstop = ()=>{{
         let blob = new Blob(recChunks, {{type:'video/webm'}});
         let a = document.createElement('a');
-        a.download = 'seoul_video.webm';
+        a.download = 'roots_{file_slug}.webm';
         a.href = URL.createObjectURL(blob); a.click();
       }};
       mediaRec.start();
       recording=true; btn.textContent='\\u25A0 Stop & download';
-      // faccio ripartire il brano da capo cosi' il video parte dall'inizio
+      // restart the piece from the beginning so the video starts at the top
       if(player){{ player.currentTime=0; player.play(); }}
     }} else {{
       mediaRec.stop(); recording=false;
-      btn.innerHTML='&#9210; registra video';
+      btn.innerHTML='&#9210; Record video';
     }}
   }};
 
@@ -386,32 +394,34 @@ button:hover{{background:#232b35;}}
 </script>
 </body></html>"""
 
-    # incapsulo in un iframe via srcdoc (base64 per evitare problemi di escape)
-    inner_b64 = base64.b64encode(inner.encode("utf-8")).decode()
-    return (f'<iframe src="data:text/html;base64,{inner_b64}" '
+    # srcdoc is used instead of src="data:..." because Chrome blocks iframes with
+    # a data: src (Safari does not). With srcdoc the HTML is inline, so double
+    # quotes become &quot; (srcdoc is wrapped in double quotes).
+    inner_escaped = inner.replace("&", "&amp;").replace('"', "&quot;")
+    return (f'<iframe srcdoc="{inner_escaped}" '
             f'style="width:100%;height:820px;border:none;border-radius:8px;" '
             f'allow="fullscreen" allowfullscreen '
-            f'sandbox="allow-scripts allow-same-origin allow-downloads"></iframe>')
+            f'></iframe>')
 
 
-# ---------- funzione principale chiamata da Gradio ----------
+# ---------- main function called by Gradio ----------
 def process(midi_file, audio_file, max_minutes, mask_choice):
     if midi_file is None:
         return "Upload a MIDI file to start.", None, None, ""
 
-    # dalla label leggibile alla chiave interna
+    # from the readable label to the internal key
     mask_key = {v: k for k, v in MASK_LABELS.items()}.get(mask_choice, "seoul")
 
     max_seconds = float(max_minutes) * 60 if max_minutes else None
     score = extract_score(midi_file, max_seconds=max_seconds)
 
-    # audio: quello alternativo se fornito, altrimenti sintetizzato
+    # audio: the user's own if provided, otherwise synthesized
     if audio_file is not None:
         audio_data, sr = sf.read(audio_file)
         if audio_data.ndim > 1:
             audio_data = audio_data.mean(axis=1)
-        # taglio l'audio al limite di durata scelto (non tocco i tempi degli eventi:
-        # audio e MIDI arrivano gia' allineati dall'utente)
+        # trim the audio to the chosen duration limit (event times are untouched:
+        # audio and MIDI are expected to be already aligned by the user)
         if max_seconds is not None:
             audio_data = audio_data[:int(max_seconds * sr)]
         buf = io.BytesIO()
@@ -429,7 +439,7 @@ def process(midi_file, audio_file, max_minutes, mask_choice):
 
     audio_b64 = base64.b64encode(audio_bytes).decode()
 
-    # salvo il JSON scaricabile con nome derivato dal MIDI
+    # save the downloadable JSON, named after the MIDI file
     json_path = _base_name(midi_file, mask_choice, "_score.json")
     with open(json_path, "w") as jf:
         json.dump(score, jf)
@@ -445,7 +455,7 @@ def process(midi_file, audio_file, max_minutes, mask_choice):
 
 # ---------- interface ----------
 def _base_name(midi_file, mask_choice, suffix):
-    """Nome file di output derivato dal MIDI caricato + forma scelta."""
+    """Output file name derived from the uploaded MIDI + chosen shape."""
     import re
     raw = os.path.splitext(os.path.basename(midi_file))[0] if midi_file else "soundmap"
     raw = re.sub(r"[^A-Za-z0-9_-]+", "_", raw).strip("_") or "soundmap"
@@ -455,7 +465,7 @@ def _base_name(midi_file, mask_choice, suffix):
 
 
 def process_mp4(midi_file, audio_file, max_minutes, mask_choice, progress=gr.Progress()):
-    """Genera un video MP4 lato Python (rendering offline, qualita' piena)."""
+    """Generates an MP4 video in Python (offline rendering, full quality)."""
     import render_mp4
     if midi_file is None:
         return None, "Upload a MIDI file to start."
@@ -464,7 +474,7 @@ def process_mp4(midi_file, audio_file, max_minutes, mask_choice, progress=gr.Pro
     max_seconds = float(max_minutes) * 60 if max_minutes else None
     score = extract_score(midi_file, max_seconds=max_seconds)
 
-    # audio: alternativo o sintetizzato
+    # audio: user-provided or synthesized
     if audio_file is not None:
         audio_data, sr = sf.read(audio_file)
         if audio_data.ndim > 1:
@@ -493,48 +503,48 @@ def process_mp4(midi_file, audio_file, max_minutes, mask_choice, progress=gr.Pro
 
 
 def on_browser(midi_file, audio_file, max_minutes, mask_choice):
-    """Pulsante 'View in browser': mostra l'anteprima interattiva."""
+    """'View in browser' button: shows the interactive preview."""
     viz, json_p, audio_p, info = process(midi_file, audio_file, max_minutes, mask_choice)
     return (gr.update(value=viz, visible=True),        # viz_out
             gr.update(value=json_p, visible=True),     # json_out
             gr.update(value=audio_p, visible=True),    # audio_out
             info,                                       # status
-            gr.update(value=None, visible=False))      # mp4_out nascosto
+            gr.update(value=None, visible=False))      # mp4_out hidden
 
 
 def on_mp4(midi_file, audio_file, max_minutes, mask_choice, progress=gr.Progress()):
-    """Pulsante 'Generate MP4': rendering offline e file scaricabile."""
+    """'Generate MP4' button: offline rendering and downloadable file."""
     mp4_path, msg = process_mp4(midi_file, audio_file, max_minutes, mask_choice, progress)
-    return (gr.update(value="", visible=False),        # viz_out nascosto
-            gr.update(value=None, visible=False),      # json_out nascosto
-            gr.update(value=None, visible=False),      # audio_out nascosto
+    return (gr.update(value="", visible=False),        # viz_out hidden
+            gr.update(value=None, visible=False),      # json_out hidden
+            gr.update(value=None, visible=False),      # audio_out hidden
             msg,                                        # status
-            gr.update(value=mp4_path, visible=True))   # mp4_out visibile
+            gr.update(value=mp4_path, visible=True))   # mp4_out visible
 
 
 # ---------- interface ----------
 _css = """
-/* --- tema scuro: fondo e pannelli scuri, solo i CONTROLLI restano chiari --- */
+/* --- dark theme: dark background and panels, only the CONTROLS stay light --- */
 .gradio-container { background:#0a0d12 !important;
   font-family:-apple-system,'Inter',system-ui,sans-serif !important; }
 #app-title { font-size:30px; font-weight:650; letter-spacing:-0.5px;
   color:#ffffff; margin-bottom:2px; }
 #app-sub { color:#c3ccd8 !important; font-size:14px; line-height:1.5; }
 #out-note, #out-note * { color:#c3ccd8 !important; }
-/* pannelli/blocchi e aree di upload: SCURI come lo sfondo */
+/* panels/blocks and upload areas: DARK like the background */
 .gradio-container .block, .gradio-container .form,
 .gradio-container [class*="panel"], .gradio-container [class*="upload"],
 .gradio-container [data-testid*="upload"] {
   background:#12161d !important; border:1px solid #232b35 !important;
   border-radius:12px !important; }
-/* testo dentro le aree di upload (Drop file, or, Click) leggibile su scuro */
+/* text inside upload areas (Drop file, or, Click) readable on dark */
 .gradio-container [class*="upload"] *,
 .gradio-container [data-testid*="upload"] * { color:#c3ccd8 !important; }
-/* etichette dei campi: CHIARE (stanno su pannello scuro) */
+/* field labels: LIGHT (they sit on a dark panel) */
 .gradio-container label span, .gradio-container .block-title,
 .gradio-container [class*="block-title"], .gradio-container label > span:first-child {
   color:#dbe2ea !important; font-weight:600 !important; }
-/* CONTROLLI chiari: dropdown, campo numero, slider-track */
+/* LIGHT controls: dropdown, number field, slider track */
 .gradio-container [class*="dropdown"] input,
 .gradio-container [class*="dropdown"] [class*="single-select"],
 .gradio-container input[type="number"], .gradio-container input[type="text"] {
@@ -544,14 +554,14 @@ _css = """
 .gradio-container li[role="option"]:hover,
 .gradio-container li[role="option"][aria-selected="true"] {
   background:#d7dee7 !important; }
-/* freccia dropdown: solo icona, niente riquadro nero */
+/* dropdown arrow: icon only, no black box */
 .gradio-container [class*="dropdown"] [class*="icon"],
 .gradio-container [class*="dropdown"] svg {
   background:transparent !important; color:#4a5563 !important; }
 .gradio-container [class*="dropdown"] button,
 .gradio-container [class*="dropdown"] [class*="token"] {
   background:transparent !important; border:none !important; }
-/* i due pulsanti modalita': chiari, testo scuro, hover verde */
+/* the two mode buttons: light, dark text, green hover */
 .gradio-container #btn-browser, .gradio-container #btn-mp4 {
   background:#eef1f5 !important; color:#1a2029 !important;
   border:1px solid #c9d2dd !important; font-weight:600 !important; }
@@ -605,14 +615,14 @@ with gr.Blocks(title="Sound Map", theme=gr.themes.Base(), css=_css) as demo:
     btn_browser.click(_clear_before_browser, inputs=None, outputs=outs).then(
         on_browser, inputs=[midi_in, audio_in, max_min, mask_choice], outputs=outs)
 
-    # MP4: prima nascondo l'anteprima e i download (evita barre sovrapposte),
-    # poi lancio il rendering. Due step concatenati.
+    # MP4: first hide the preview and downloads (avoids overlapping bars),
+    # then start the rendering. Two chained steps.
     def _clear_before_mp4():
-        return (gr.update(value="", visible=False),   # viz_out via
-                gr.update(value=None, visible=False),  # json_out via
-                gr.update(value=None, visible=False),  # audio_out via
+        return (gr.update(value="", visible=False),   # viz_out off
+                gr.update(value=None, visible=False),  # json_out off
+                gr.update(value=None, visible=False),  # audio_out off
                 "Rendering…",                          # status
-                gr.update(value=None, visible=False))  # mp4_out via
+                gr.update(value=None, visible=False))  # mp4_out off
     btn_mp4.click(_clear_before_mp4, inputs=None, outputs=outs).then(
         on_mp4, inputs=[midi_in, audio_in, max_min, mask_choice], outputs=outs)
 
