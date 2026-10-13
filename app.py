@@ -137,11 +137,14 @@ def build_viz_html(score_json, audio_b64, mask_key="seoul"):
     else:
         ch = 1000; cw = int(1000 * aspect)
     """Builds the p5.js visualization inside an isolated IFRAME."""
-    canvas_css = "max-width:100%;max-height:100%;height:auto;width:auto;"
+    # width/height must override the pixel size p5 writes inline on the canvas,
+    # otherwise on narrow screens only the width shrinks and the map gets squashed
+    canvas_css = "max-width:100%;max-height:100%;height:auto !important;width:auto !important;"
     inner = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
 html,body{{margin:0;height:100%;background:#0a0d12;font-family:-apple-system,system-ui,sans-serif;overflow:hidden;}}
 #wrap{{display:flex;flex-direction:column;height:100vh;}}
+body.pseudo-fs #wrap{{height:100vh;height:100dvh;}}
 .ctrl{{flex:0 0 auto;text-align:center;padding:8px;background:#0a0d12;}}
 #viz-holder{{flex:1 1 auto;display:flex;justify-content:center;align-items:center;min-height:0;overflow:hidden;}}
 #viz-holder canvas{{{canvas_css}}}
@@ -159,7 +162,7 @@ button:hover{{background:#232b35;}}
 <div class="ctrl">
   <button onclick="window.vizPlay()">&#9654; Play</button>
   <button onclick="window.vizPause()">&#9208; Pause</button>
-  <button onclick="window.vizFull()">&#9974; Fullscreen</button>
+  <button id="fsBtn" onclick="window.vizFull()">&#9974; Fullscreen</button>
   <button onclick="window.vizSaveImg()">&#128247; Save image</button>
   <button id="recBtn" onclick="window.vizRec()">&#9210; Record video</button>
   <div class="bar-wrap">
@@ -339,11 +342,34 @@ button:hover{{background:#232b35;}}
   window.vizPause = function(){{ if(player){{ player.pause(); }} }};
 
   // fullscreen on the visualization container
+  // where the Fullscreen API is not available (e.g. iPhone Safari, which only allows
+  // it for videos) the button falls back to filling the visible area of the page
   window.vizFull = function(){{
     let el = document.getElementById('wrap');
-    if(document.fullscreenElement){{ document.exitFullscreen(); }}
-    else if(el.requestFullscreen){{ el.requestFullscreen(); }}
-    else if(el.webkitRequestFullscreen){{ el.webkitRequestFullscreen(); }}
+    let canFs = (document.fullscreenEnabled || document.webkitFullscreenEnabled) &&
+                (el.requestFullscreen || el.webkitRequestFullscreen);
+    if(canFs){{
+      if(document.fullscreenElement || document.webkitFullscreenElement){{
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      }} else if(el.requestFullscreen){{ el.requestFullscreen(); }}
+      else {{ el.webkitRequestFullscreen(); }}
+      return;
+    }}
+    let on = !document.body.classList.contains('pseudo-fs');
+    document.body.classList.toggle('pseudo-fs', on);
+    let fe = null;
+    try {{ fe = window.frameElement; }} catch(e) {{ fe = null; }}
+    if(fe){{
+      if(on){{
+        fe.dataset.prevStyle = fe.getAttribute('style') || '';
+        fe.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;height:100dvh;' +
+                           'z-index:2147483647;border:none;border-radius:0;background:#0a0d12;';
+      }} else {{
+        fe.setAttribute('style', fe.dataset.prevStyle || '');
+      }}
+    }}
+    let btn = document.getElementById('fsBtn');
+    if(btn) btn.innerHTML = on ? '&#10005; Exit fullscreen' : '&#9974; Fullscreen';
   }};
 
   // save the current frame as PNG
